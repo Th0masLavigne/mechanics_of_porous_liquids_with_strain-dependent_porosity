@@ -46,6 +46,7 @@ def T_mesh(length_x, height_x,length_y,height_y, size_min=0.1, size_max=1, **kwa
 	- `MeshSizeExtendFromBoundary` (int): Sets Mesh.MeshSizeExtendFromBoundary (1 to extend boundary-defined sizes).
 	- `MeshSizeFromPoints` (int): Sets Mesh.MeshSizeFromPoints (1 to use sizes defined at points).
 	- `MeshSizeFromCurvature` (int): Sets Mesh.MeshSizeFromCurvature (1 to refine mesh based on curvature).
+	- `filename` (str): Output mesh file (default: `geometry/2D_T_mesh.msh`).
 	- `log` (bool): If True, enables Gmsh logging and saves a log and the 
 	  `.geo_unrolled` file in the `geometry/` directory.
 
@@ -193,10 +194,13 @@ def T_mesh(length_x, height_x,length_y,height_y, size_min=0.1, size_max=1, **kwa
 	gmsh.model.occ.synchronize()
 	# 
 	gmsh.model.mesh.generate(gdim)
-	gmsh.write("geometry/2D_T_mesh.msh")
+	filename = kwargs.get('filename', "geometry/2D_T_mesh.msh")
+	if os.path.dirname(filename):
+		os.makedirs(os.path.dirname(filename), exist_ok=True)
+	gmsh.write(filename)
 	# 
 	if log:
-		gmsh.write('geometry/2D_T_mesh.geo_unrolled')
+		gmsh.write(os.path.splitext(filename)[0] + '.geo_unrolled')
 		# Récupérer les messages internes de Gmsh
 		logs = gmsh.logger.get()
 		for line in logs:

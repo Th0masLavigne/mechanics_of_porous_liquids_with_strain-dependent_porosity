@@ -2,6 +2,27 @@
 
 A collection of **Finite Element Method (FEM)** simulations developed using **DolfinX** to model problems involving **porous media mechanics** for **porous liquid** formulations. The project is structured into two main simulation cases: a channel flow problem and a transient consolidation problem.
 
+These codes accompany the article *Mechanics of porous liquids with strain-dependent porosity* (G. Sciumè, T. Lavigne, W. G. Gray), currently **under review**.
+
+---
+
+## 📖 Citation
+
+If you use these codes, or part of them, in your work, **please cite the related article**:
+
+> Sciumè, G., Lavigne, T., & Gray, W. G. *Mechanics of porous liquids with strain-dependent porosity*. Submitted (under review).
+
+```bibtex
+@unpublished{Sciume_Lavigne_Gray_porous_liquids,
+  author = {Sciumè, Giuseppe and Lavigne, Thomas and Gray, William G.},
+  title  = {Mechanics of porous liquids with strain-dependent porosity},
+  note   = {Submitted, under review},
+  year   = {2026}
+}
+```
+
+*This reference will be updated with the journal, volume and DOI once the article is published.*
+
 ---
 
 ## Project Structure
@@ -12,11 +33,13 @@ The core of the project is organized into two main directories, each representin
 .
 ├── Channel/
 │       ├── Croix_porous_liquid.py
+│       ├── run_convergence_study.sh
+│       ├── convergence_postprocess.py
 │       └── service_files_channel/
 └── Consolidation/
         ├── Porous_Liquid.py
         └── service_files_consolidation/
-````
+```
 
 -----
 
@@ -32,7 +55,9 @@ The simulations rely on the **FEniCS Project** ecosystem. The following dependen
 
 -----
 ## Docker environment
+
 FEniCSx v0.9.0:
+
 ```cmd
 docker run -ti -v $(pwd):/home/fenicsx/shared -w /home/fenicsx/shared th0maslavigne/dolfinx:v0.9.0
 ```
@@ -48,7 +73,24 @@ This case simulates fluid flow through a domain, including a T-junction (dead-en
 | File/Folder | Description |
 | :--- | :--- |
 | `Croix_porous_liquid.py` | **Main execution script** for setting up and running the channel flow simulation. |
+| `run_convergence_study.sh` | Runs the spatial (mesh) and temporal (time-step) convergence study. |
+| `convergence_postprocess.py` | Computes the convergence metrics and writes the csv files used in the Supplementary Material (Table S1, Figure S1). |
 | `service_files_channel/` | Contains the utility modules. |
+
+`Croix_porous_liquid.py` accepts optional command-line arguments (defaults reproduce the article: `--dt 1e-2 --size_max 1e-3`):
+
+```bash
+mpirun -n 4 python3 Croix_porous_liquid.py --dt 5e-3 --size_max 5e-4 --tag _test --no_fields
+```
+
+**Convergence study** (from `Channel/`):
+
+```bash
+NP=4 bash run_convergence_study.sh      # 4 mesh sizes (dt = 0.01 s) + 5 time steps (h_max = 1 mm)
+python3 convergence_postprocess.py      # -> convergence_results/*.csv, summary and quick-look figure
+```
+
+The metric is the relative L2 error of the axial velocity profiles at x = 0.1L and x = 0.9L (accumulated over all time steps, and at t = 0.01, 1.15, 5 s), plus the error on the infiltration velocity at the branch mid-point, with respect to the finest discretization of each series. Observed orders of convergence are also reported.
 
 ### 2\. Consolidation Simulation (`Consolidation/`)
 

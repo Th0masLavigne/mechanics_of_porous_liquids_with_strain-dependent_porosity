@@ -17,6 +17,7 @@ import basix
 import numpy
 from dolfinx.fem.petsc import NonlinearProblem
 import time
+import argparse
 # 
 if mpi4py.MPI.COMM_WORLD == 0:
 	print("Dolfinx version is:",dolfinx.__version__)
@@ -36,18 +37,42 @@ import constitutive_laws
 import functions
 # 
 # --------------------------------------- #
+# 	   	Command-line parameters		  #
+# --------------------------------------- #
+# Defaults reproduce the simulation reported in the manuscript
+# (dt = 0.01 s, Gmsh size_max = 1 mm -> mean element size ~1.02 mm).
+# They are overridden by run_convergence_study.sh for the spatial and
+# temporal convergence study (Supplementary Material).
+parser = argparse.ArgumentParser(description="Porous liquid flow in a bifurcated (T-shaped) channel")
+parser.add_argument("--dt",        type=float, default=1e-2, help="time step [s]")
+parser.add_argument("--t_fin",     type=float, default=5.,   help="final time [s]")
+parser.add_argument("--size_max",  type=float, default=1e-3, help="Gmsh Mesh.MeshSizeMax [m]")
+parser.add_argument("--size_min",  type=float, default=None, help="Gmsh Mesh.MeshSizeMin [m] (default: size_max/10)")
+parser.add_argument("--tag",       type=str,   default="",   help="suffix of the output folder / mesh file")
+parser.add_argument("--no_fields", action="store_true",      help="skip the XDMF/VTK export of the fields (convergence runs)")
+args = parser.parse_args()
+size_max = args.size_max
+size_min = args.size_min if args.size_min is not None else args.size_max/10
+# 
+# path to the ouptut
+folder = f"./outputs_croix{args.tag}/"
+# legacy csv files are written in the working directory for the reference run,
+# and in the output folder for tagged (convergence) runs to avoid overwriting
+csv_dir = "." if args.tag == "" else folder
+# 
+# --------------------------------------- #
 # 	   			Clean workspace	 		  #
 # --------------------------------------- #
-# path to the ouptut
-folder = "./outputs_croix/"
 # 
 # remove old output if exists
 if mpi4py.MPI.COMM_WORLD.rank == 0:
 	if os.path.exists(folder) and os.path.isdir(folder):
-	    shutil.rmtree(folder)
-	    print(f"Removed folder: {folder}")
+		shutil.rmtree(folder)
+		print(f"Removed folder: {folder}")
 	else:
-	    print(f"Folder does not exist: {folder}")
+		print(f"Folder does not exist: {folder}")
+	os.makedirs(folder, exist_ok=True)
+mpi4py.MPI.COMM_WORLD.Barrier()
 # 
 # 
 # --------------------------------------- #
@@ -83,14 +108,16 @@ def evaluate_point(mesh, function, contributing_cells, point, output_list, index
 # --------------------------------------- #
 #
 #
-t_fin = 5
+t_fin = args.t_fin
 # Time step [s]. Original value (0.005h).
-dt    = 1e-2
+dt    = args.dt
 #
-num_steps = int(t_fin/dt)
+num_steps = int(round(t_fin/dt))
 #
 # time steps to evaluate the pressure/velocity profiles in space 
 n0, n1, n2, n3, n4 = 10, 70, 115, 300, 450
+# keep the same physical snapshot times if dt differs from the reference 0.01 s
+n0, n1, n2, n3, n4 = [int(round(n*1e-2/dt)) for n in (n0, n1, n2, n3, n4)]
 # --------------------------------------- #
 # 	   	Geometrical parameters			  #
 # --------------------------------------- #
@@ -101,7 +128,7 @@ L1,H1,l2,H2 = 1e-1, 2e-2,1e-2,5e-2
 # 	   		Generate Mesh				  #
 # --------------------------------------- #
 # Create gmsh tagged mesh
-gmsh_name = "geometry/2D_T_mesh.msh"
+gmsh_name = f"geometry/2D_T_mesh{args.tag}.msh"
 # 
 if (os.path.exists(gmsh_name)) and (create_new_mesh == False):
 	pass
@@ -109,8 +136,10 @@ else:
 	if mpi4py.MPI.COMM_WORLD.rank == 0:
 		# Reverted to the original mesh resolution (1e-4/1e-3), matching the
 		# "2nd experiment" baseline being reproduced here.
-		geometry_porous_liquid.T_mesh(L1,H1,l2,H2, size_min=1e-4, size_max=1e-3, log=True, optimise=True, netgen=True)
+		geometry_porous_liquid.T_mesh(L1,H1,l2,H2, size_min=size_min, size_max=size_max, log=True, optimise=True, netgen=True, filename=gmsh_name)
 # 
+# Make sure the mesh file is written before the other ranks read it
+mpi4py.MPI.COMM_WORLD.Barrier()
 # Read the mesh and tags
 gmsh_model_rank = 0
 gdim            = 2
@@ -119,7 +148,7 @@ domain, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh(gmsh_name, mpi4p
 # 
 # # 
 if log_mesh:
-	xdmftag = dolfinx.io.XDMFFile(mpi4py.MPI.COMM_WORLD, 'outputs_croix/debug_tags_mesh.xdmf', "w")
+	xdmftag = dolfinx.io.XDMFFile(mpi4py.MPI.COMM_WORLD, folder+'debug_tags_mesh.xdmf', "w")
 	xdmftag.write_mesh(domain)
 	xdmftag.write_meshtags(facet_tags, domain.geometry)
 	xdmftag.write_meshtags(cell_tags,  domain.geometry)
@@ -164,6 +193,48 @@ colliding_cells  = dolfinx.geometry.compute_colliding_cells(domain, cell_candida
 branch_point            = numpy.array([[L1/2, H1+H2/2, 0.]])
 branch_cell_candidates  = dolfinx.geometry.compute_collisions_points(tree, branch_point)
 branch_colliding_cells  = dolfinx.geometry.compute_colliding_cells(domain, branch_cell_candidates, branch_point)
+#
+# Convergence-study probes: dense vx(y) profiles at x = 0.1 L and x = 0.9 L
+# (same sections as Figure 12) + the branch mid-point (infiltration velocity).
+num_conv    = 41
+y_conv      = numpy.linspace(0, H1, num_conv)
+conv_points = numpy.zeros((2*num_conv+1, 3))
+conv_points[:num_conv, 0]           = L1/10
+conv_points[:num_conv, 1]           = y_conv
+conv_points[num_conv:2*num_conv, 0] = 9*L1/10
+conv_points[num_conv:2*num_conv, 1] = y_conv
+conv_points[2*num_conv]             = branch_point[0]
+conv_cell_candidates = dolfinx.geometry.compute_collisions_points(tree, conv_points)
+conv_colliding_cells = dolfinx.geometry.compute_colliding_cells(domain, conv_cell_candidates, conv_points)
+#
+def evaluate_points(mesh, function, colliding_cells, pts):
+	"""
+	Evaluate a (vector) function at all points in a single call (MPI safe).
+	Returns an array (num_points, value_size) on rank 0, None elsewhere.
+	"""
+	ids, cells = [], []
+	for i in range(pts.shape[0]):
+		links = colliding_cells.links(i)
+		if len(links) > 0:
+			ids.append(i)
+			cells.append(links[0])
+	vals = None
+	if len(ids) > 0:
+		vals = function.eval(pts[ids], numpy.asarray(cells, dtype=numpy.int32))
+	gathered = mesh.comm.gather((ids, vals), root=0)
+	if mesh.comm.rank != 0:
+		return None
+	out = None
+	for g_ids, g_vals in gathered:
+		if g_vals is None:
+			continue
+		g_vals = numpy.asarray(g_vals).reshape(len(g_ids), -1)
+		if out is None:
+			out = numpy.full((pts.shape[0], g_vals.shape[1]), numpy.nan)
+		for k, i in enumerate(g_ids):
+			if numpy.isnan(out[i, 0]):
+				out[i] = g_vals[k]
+	return out
 #
 # --------------------------------------- #
 # 	   		Material parameters			  #
@@ -398,20 +469,35 @@ pressuref_mid_t    = numpy.zeros(num_steps+1, dtype=dolfinx.default_scalar_type)
 L_velocity_mid_t   = numpy.zeros(num_steps+1, dtype=dolfinx.default_scalar_type)
 v_branch_t         = numpy.zeros(num_steps+1, dtype=dolfinx.default_scalar_type)
 #
+# Convergence-study time histories, evaluated on the P2 velocity (no projection)
+velocity_P2        = dolfinx.fem.Function(Velocity_)
+conv_vx_inlet_t    = numpy.full((num_steps+1, num_conv), numpy.nan)
+conv_vx_outlet_t   = numpy.full((num_steps+1, num_conv), numpy.nan)
+conv_vy_branch_t   = numpy.full(num_steps+1, numpy.nan)
+completed_steps    = 0
+def record_convergence_probes(index):
+	velocity_P2.x.array[:] = previous_solution.x.array[Velocity_to_MS]
+	velocity_P2.x.scatter_forward()
+	vals = evaluate_points(domain, velocity_P2, conv_colliding_cells, conv_points)
+	if domain.comm.rank == 0:
+		conv_vx_inlet_t[index]  = vals[:num_conv, 0]
+		conv_vx_outlet_t[index] = vals[num_conv:2*num_conv, 0]
+		conv_vy_branch_t[index] = vals[2*num_conv, 1]
+#
 #
 # Open file for export
-xdmf = dolfinx.io.XDMFFile(domain.comm, "outputs_croix/Output.xdmf", "w")
+xdmf = dolfinx.io.XDMFFile(domain.comm, folder+"Output.xdmf", "w")
 xdmf.write_mesh(domain)
 # vtk outputs
-pressure_vtk       = dolfinx.io.VTKFile(domain.comm, "outputs_croix/VTK/pressure.pvd", "w")
+pressure_vtk       = dolfinx.io.VTKFile(domain.comm, folder+"VTK/pressure.pvd", "w")
 pressure_vtk.write_mesh(domain)
-fraction_vtk       = dolfinx.io.VTKFile(domain.comm, "outputs_croix/VTK/fraction.pvd", "w")
+fraction_vtk       = dolfinx.io.VTKFile(domain.comm, folder+"VTK/fraction.pvd", "w")
 fraction_vtk.write_mesh(domain)
-velocity_vtk       = dolfinx.io.VTKFile(domain.comm, "outputs_croix/VTK/velocity.pvd", "w")
+velocity_vtk       = dolfinx.io.VTKFile(domain.comm, folder+"VTK/velocity.pvd", "w")
 velocity_vtk.write_mesh(domain)
-porosity_vtk       = dolfinx.io.VTKFile(domain.comm, "outputs_croix/VTK/porosity.pvd", "w")
+porosity_vtk       = dolfinx.io.VTKFile(domain.comm, folder+"VTK/porosity.pvd", "w")
 porosity_vtk.write_mesh(domain)
-cell_pressure_vtk  = dolfinx.io.VTKFile(domain.comm, "outputs_croix/VTK/cell_pressure.pvd", "w")
+cell_pressure_vtk  = dolfinx.io.VTKFile(domain.comm, folder+"VTK/cell_pressure.pvd", "w")
 cell_pressure_vtk.write_mesh(domain)
 # initialise time
 t = 0
@@ -447,9 +533,10 @@ evaluate_point(domain, __pressure, colliding_cells.links(2*num_points+0), points
 evaluate_point(domain, __pressure, colliding_cells.links(2*num_points+7), points[2*num_points+7], pressuref_mid_t, 0)
 evaluate_point(domain, velocity.sub(0), colliding_cells.links(7), points[7], L_velocity_mid_t, 0)
 evaluate_point(domain, velocity.sub(1), branch_colliding_cells.links(0), branch_point[0], v_branch_t, 0)
+record_convergence_probes(0)
 #
 for iteration in range(num_steps):
-	t+=dt 
+	t = (iteration+1)*dt
 	if mpi4py.MPI.COMM_WORLD.rank == 0:
 		print('Step: ',iteration+1,'/',num_steps, 'time:', t, ' s')
 	try:
@@ -457,7 +544,9 @@ for iteration in range(num_steps):
 		if mpi4py.MPI.COMM_WORLD.rank == 0:
 			print(f'   Newton iterations: {num_its}, converged: {converged}')
 			rp_vals = solution.x.array[right_pressure_dofs]
-			print(f'   right-boundary pressure DOFs: min={rp_vals.min():.6g}, max={rp_vals.max():.6g} (should be exactly {float(p_right.value)})')
+			# rank 0 may own no right-boundary dof when the mesh is partitioned
+			if rp_vals.size > 0:
+				print(f'   right-boundary pressure DOFs: min={rp_vals.min():.6g}, max={rp_vals.max():.6g} (should be exactly {float(p_right.value)})')
 	except Exception as e:
 		if mpi4py.MPI.COMM_WORLD.rank == 0:
 			print("*************")
@@ -501,7 +590,9 @@ for iteration in range(num_steps):
 	evaluate_point(domain, __pressure, colliding_cells.links(2*num_points+7), points[2*num_points+7], pressuref_mid_t, iteration+1)
 	evaluate_point(domain, velocity.sub(0), colliding_cells.links(7), points[7], L_velocity_mid_t, iteration+1)
 	evaluate_point(domain, velocity.sub(1), branch_colliding_cells.links(0), branch_point[0], v_branch_t, iteration+1)
-	if iteration%1 == 0:
+	record_convergence_probes(iteration+1)
+	completed_steps = iteration+1
+	if (not args.no_fields) and iteration%1 == 0:
 		# Export in the xdmf file 
 		xdmf.write_function(__pressure,t)
 		xdmf.write_function(__fraction,t)
@@ -560,15 +651,27 @@ if mpi4py.MPI.COMM_WORLD.rank == 0:
 	print(f"FEM operated with {num_steps} iterations, in {t_hours} h {tmin} min {tsec} sec")
 # 
 # EoF
+n_cells = domain.topology.index_map(domain.topology.dim).size_global
+n_dofs  = MS.dofmap.index_map.size_global*MS.dofmap.index_map_bs
 if mpi4py.MPI.COMM_WORLD.rank == 0:
+	# Raw data of the spatial/temporal convergence study
+	# (post-processed by convergence_postprocess.py)
+	numpy.savez(os.path.join(folder, "convergence_data.npz"),
+		t=t_history[:completed_steps+1], y=y_conv,
+		vx_inlet=conv_vx_inlet_t[:completed_steps+1], vx_outlet=conv_vx_outlet_t[:completed_steps+1],
+		vy_branch=conv_vy_branch_t[:completed_steps+1],
+		dt=dt, t_fin=t_fin, completed=(completed_steps == num_steps),
+		size_max=size_max, size_min=size_min,
+		mean_h=mesh_stats['mean_h'], std_h=mesh_stats['std_dev_h'],
+		n_cells=n_cells, n_dofs=n_dofs)
 	functions.export_to_csv(
 		[x_check,pressuref_space0,pressures_space0,pressuref_space1,pressures_space1,pressuref_space2,pressures_space2,pressuref_space3,pressures_space3,pressuref_space4,pressures_space4],
-		"pressure_space.csv",
+		os.path.join(csv_dir, "pressure_space.csv"),
 		["x","pressuref_space0","pressures_space0","pressuref_space1","pressures_space1","pressuref_space2","pressures_space2","pressuref_space3","pressures_space3","pressuref_space4","pressures_space4"]
 		)
 	functions.export_to_csv(
 		[y_check,L_velocity_space0,R_velocity_space0,L_velocity_space1,R_velocity_space1,L_velocity_space2,R_velocity_space2,L_velocity_space3,R_velocity_space3,L_velocity_space4,R_velocity_space4],
-		"velocity_space.csv",
+		os.path.join(csv_dir, "velocity_space.csv"),
 		["y","L_velocity_space0","R_velocity_space0","L_velocity_space1","R_velocity_space1","L_velocity_space2","R_velocity_space2","L_velocity_space3","R_velocity_space3","L_velocity_space4","R_velocity_space4"]
 		)
 	# Diagnostic-only time-history export (not read by any existing tex
@@ -577,7 +680,7 @@ if mpi4py.MPI.COMM_WORLD.rank == 0:
 	# instants and give no information on the time evolution.
 	functions.export_to_csv(
 		[t_history,pressuref_inlet_t,pressuref_mid_t,L_velocity_mid_t,v_branch_t],
-		"time_series.csv",
+		os.path.join(csv_dir, "time_series.csv"),
 		["t","pressuref_inlet","pressuref_mid","L_velocity_mid","v_branch"]
 		)
 	def transpose_csv(input_file,output_file):
@@ -600,10 +703,10 @@ if mpi4py.MPI.COMM_WORLD.rank == 0:
 		    writer.writerows(transposed_data) # écrire les données transposées
 		print(f"Transposition terminée pour latex: {output_file}")
 
-	input_file = "pressure_space.csv"
-	output_file = "pressure_space_t.csv"
+	input_file = os.path.join(csv_dir, "pressure_space.csv")
+	output_file = os.path.join(csv_dir, "pressure_space_t.csv")
 	transpose_csv(input_file,output_file)
 
-	input_file = "velocity_space.csv"
-	output_file = "velocity_space_t.csv"
+	input_file = os.path.join(csv_dir, "velocity_space.csv")
+	output_file = os.path.join(csv_dir, "velocity_space_t.csv")
 	transpose_csv(input_file,output_file)
