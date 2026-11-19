@@ -1,5 +1,7 @@
 .DS_Store
 */outputs_fluid_terzaghi/*
+*/outputs*
+*result*
 */geometry/*
 */outputs_croix/*
 *.xdmf
@@ -10,3 +12,10 @@
 *.jpg
 *.jpeg
 *.gif
+__pycache__/
+*.tex
+*.pdf
+*.aux
+*.log
+*.out
+*.synctex.gz
