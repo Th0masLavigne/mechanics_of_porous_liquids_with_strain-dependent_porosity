@@ -6,7 +6,7 @@ These codes accompany the article *Mechanics of porous liquids with strain-depen
 
 ---
 
-## 📖 Citation
+## Citation
 
 If you use these codes, or part of them, in your work, **please cite the related article**:
 
@@ -43,7 +43,7 @@ The core of the project is organized into two main directories, each representin
 
 -----
 
-## 🛠️ Prerequisites
+## Prerequisites
 
 The simulations rely on the **FEniCS Project** ecosystem. The following dependencies are required:
 
@@ -127,7 +127,7 @@ The following Python modules define core components and are utilized by both mai
     cd Consolidation/
     ```
 
-2.  **Execute** the main Python script using `mpiexec` for parallel processing (recommended for performance with DolfinX):
+2.  **Execute** the main Python script using `mpirun` for parallel processing (recommended for performance with DolfinX):
 
     ```bash
     # Run Channel flow simulation on 4 cores
